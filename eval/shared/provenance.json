@@ -1,0 +1,17 @@
+{
+  "source_repository": "https://github.com/wangruohui/EfficientVideoAgent",
+  "local_source": "SPOT/EfficientVideoAgent",
+  "files": {
+    "select_frame_fallback.py": "6b3872ef5e9da277e824625a7a652f67ac44a9f563cd01a647777259308fd252",
+    "eval-eva.py": "1f3b5f3c489d9b2f47b40fb1de18acde1d125d5bcbae9b706855a60e51b0ee2d"
+  },
+  "extractor_copy": "select_frame_fallback.py is byte-for-byte unchanged",
+  "references": [
+    "SPOT/eulorian/spot_eulorian/{api,history,runner}.py",
+    "SPOT/claude_eval/spot_claude_eval/openrouter.py"
+  ],
+  "api_docs": [
+    "https://openrouter.ai/docs/guides/features/tool-calling",
+    "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens"
+  ]
+}

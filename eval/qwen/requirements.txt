@@ -1,0 +1,10 @@
+# Matched runtime used for the original experiments. Install into a dedicated
+# environment in a Slurm allocation; do not replace a shared environment.
+torch==2.8.0
+transformers==4.57.3
+vllm==0.11.0
+qwen-vl-utils==0.0.14
+numpy==1.26.4
+opencv-python-headless>=4.8,<4.12
+decord==0.6.0
+# System dependency: ffprobe (FFmpeg).

@@ -1,0 +1,9 @@
+# Cluster/user-specific scripts, settings and logs; never published.
+local/
+# Generated datasets and trajectories.
+data/
+# Working notes and agent instructions for our runs.
+AGENTS.md
+current_progress.md
+__pycache__/
+*.pyc

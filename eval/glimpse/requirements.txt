@@ -1,0 +1,5 @@
+numpy>=1.26,<2
+opencv-python-headless>=4.8,<4.12
+decord==0.6.0
+# Optional extractor fallback, matching EVA: torchcodec<0.10.0 with compatible torch.
+# System dependency: ffprobe (FFmpeg).
