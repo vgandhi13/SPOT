@@ -123,57 +123,96 @@ def make_memory(record, parts, evidence_mode=TEXT_ONLY):
             "evidence_mode": evidence_mode}
 
 
+class QuotaExhausted(RuntimeError):
+    """The provider keeps rate-limiting (e.g. a daily free-model cap); stop and resume later."""
+
+
+def memory_name(record):
+    """q<ID>_run_<i> for an export.py run folder; one memory file per source run."""
+    run = Path(record["run_dir"])
+    return f"{run.parent.name}_{run.name}"
+
+
 def generate_memories(records, args):
-    """One memory per record; a part failing validation is re-requested up to twice with feedback."""
+    """One memory file per record in output/memories/, skipping ones already made.
+
+    A part failing validation is re-requested up to twice with feedback. Other per-record
+    failures go to failures.jsonl and the run moves on; persistent HTTP 429 stops the run.
+    """
+    output = Path(args.output)
+    folder = output / "memories"
+    folder.mkdir(parents=True, exist_ok=True)
+    done = 0
+    for r in records:
+        path = folder / f"{memory_name(r)}.json"
+        if path.exists():
+            continue
+        try:
+            memory = generate_memory(r, args)
+        except RuntimeError as exc:
+            if "HTTP 429" in str(exc):
+                raise QuotaExhausted(f"Rate limited at {memory_name(r)}; resume later") from None
+            failure = f"{type(exc).__name__}: {exc}"
+        except (ValueError, TypeError, KeyError) as exc:
+            failure = f"{type(exc).__name__}: {exc}"
+        else:
+            write(path, memory)
+            done += 1
+            print(f"{memory_name(r)}: {r['outcome']}", flush=True)
+            continue
+        with (output / "failures.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"memory": memory_name(r), "error": failure}) + "\n")
+        print(f"{memory_name(r)}: FAILED {failure}", flush=True)
+    memories = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(folder.glob("*.json"))]
+    write(output / "generated_memories.json", memories)
+    return {"count": len(memories), "new": done, "path": str(output / "generated_memories.json")}
+
+
+def generate_memory(r, args):
     output = Path(args.output)
     include_frames = getattr(args, "include_frames", False)
     evidence_mode = WITH_FRAMES if include_frames else TEXT_ONLY
-    memories = []
-    for r in records:
-        parts = {job["part"]: call_model(job["messages"], args, output / "responses", record=r)
-                 for job in memory_jobs(r, include_frames)}
-        for validation_attempt in range(3):
-            try:
-                memory = make_memory(r, parts, evidence_mode)
-                break
-            except (ValueError, TypeError, KeyError) as exc:
-                if validation_attempt == 2:
-                    raise
-                detail = str(exc)
-                part = "strategic_guidelines"
-                if any(word in detail.lower() for word in ("refined", "step", "chronological", "critical_observation")):
-                    part = "refined_trajectory"
-                elif "description" in detail.lower():
-                    part = "contextual_description"
-                else:
-                    for candidate in ("refined_trajectory", "strategic_guidelines"):
-                        if candidate in parts:
-                            try:
-                                parse_json_response(parts[candidate])
-                            except (ValueError, TypeError):
-                                part = candidate
-                                break
-                job = next(job for job in memory_jobs(r, include_frames) if job["part"] == part)
-                feedback = (f"The previous {part} response failed validation: {detail}.\n"
-                    f"The recorded outcome is {r['outcome']}. Existing source turn numbers are "
-                    f"{[row['turn'] for row in r['trace']]}. For refined trajectories, use only these source turn "
-                    "numbers, once each, in increasing chronological order. Combine relevant actions within "
-                    "one source turn; do not number newly invented logical substeps.\n"
-                    "Follow the original abstraction instructions: replace specific people/events with "
-                    "placeholders, qualify agent-reported observations, and do not reproduce the answer key. "
-                    f"Return only the corrected {part}, in the format requested by the system prompt.")
-                messages = job["messages"] + [{"role": "assistant", "content": parts[part]},
-                    {"role": "user", "content": feedback}]
-                with (output / "validation_retries.jsonl").open("a", encoding="utf-8") as stream:
-                    stream.write(json.dumps({"memory_id": memory_id(r), "part": part,
-                        "attempt": validation_attempt + 1, "validation_error": detail,
-                        "messages": messages}, ensure_ascii=False) + "\n")
-                print(f"{memory_id(r)}: retrying {part} after validation failure", flush=True)
-                parts[part] = call_model(messages, args, output / "responses", record=r)
-        memories.append(memory)
-        write(output / "generated_memories.json", memories)
-        print(f"{memory['memory_id']}: {r['outcome']}", flush=True)
-    return {"count": len(memories), "path": str(output / "generated_memories.json")}
+    parts = {job["part"]: call_model(job["messages"], args, output / "responses", record=r)
+             for job in memory_jobs(r, include_frames)}
+    for validation_attempt in range(3):
+        try:
+            memory = make_memory(r, parts, evidence_mode)
+            break
+        except (ValueError, TypeError, KeyError) as exc:
+            if validation_attempt == 2:
+                raise
+            detail = str(exc)
+            part = "strategic_guidelines"
+            if any(word in detail.lower() for word in ("refined", "step", "chronological", "critical_observation")):
+                part = "refined_trajectory"
+            elif "description" in detail.lower():
+                part = "contextual_description"
+            else:
+                for candidate in ("refined_trajectory", "strategic_guidelines"):
+                    if candidate in parts:
+                        try:
+                            parse_json_response(parts[candidate])
+                        except (ValueError, TypeError):
+                            part = candidate
+                            break
+            job = next(job for job in memory_jobs(r, include_frames) if job["part"] == part)
+            feedback = (f"The previous {part} response failed validation: {detail}.\n"
+                f"The recorded outcome is {r['outcome']}. Existing source turn numbers are "
+                f"{[row['turn'] for row in r['trace']]}. For refined trajectories, use only these source turn "
+                "numbers, once each, in increasing chronological order. Combine relevant actions within "
+                "one source turn; do not number newly invented logical substeps.\n"
+                "Follow the original abstraction instructions: replace specific people/events with "
+                "placeholders, qualify agent-reported observations, and do not reproduce the answer key. "
+                f"Return only the corrected {part}, in the format requested by the system prompt.")
+            messages = job["messages"] + [{"role": "assistant", "content": parts[part]},
+                {"role": "user", "content": feedback}]
+            with (output / "validation_retries.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"memory_id": memory_id(r), "part": part,
+                    "attempt": validation_attempt + 1, "validation_error": detail,
+                    "messages": messages}, ensure_ascii=False) + "\n")
+            print(f"{memory_id(r)}: retrying {part} after validation failure", flush=True)
+            parts[part] = call_model(messages, args, output / "responses", record=r)
+    return memory
 
 
 def validate_memories(memories):

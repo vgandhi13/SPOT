@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 
 from .prompts import CATEGORIES
 
@@ -12,7 +13,9 @@ def load_record(run_dir, holmes_rows):
     raw = (run_dir / "trajectory.json").read_bytes()
     trajectory = json.loads(raw)
     row = holmes_rows[int(trajectory["question_id"])]
-    if row["Question Type"] not in CATEGORIES or row["Answer"] != trajectory["gt"]:
+    # A few train labels carry annotation suffixes, e.g. "PAR-1" or "SR（附加题）"; keep the category.
+    question_type = re.match(r"[A-Z]*", row["Question Type"]).group()
+    if question_type not in CATEGORIES or row["Answer"] != trajectory["gt"]:
         raise ValueError(f"Trajectory does not match its Video-Holmes question: {run_dir}")
     trace = [json.loads(line) for line in (run_dir / "raw_trace.jsonl").read_text(encoding="utf-8").splitlines() if line]
     answer = trajectory["answer"] or ""
@@ -22,7 +25,7 @@ def load_record(run_dir, holmes_rows):
                                "frames": call["frames"]}}
                    for turn in trajectory["turns"] for call in turn["tool_calls"]]
     return {"question_id": row["Question ID"], "video_id": row["video ID"],
-            "Question Type": row["Question Type"], "question": row["Question"], "options": row["Options"],
+            "Question Type": question_type, "question": row["Question"], "options": row["Options"],
             "ground_truth": row["Answer"], "answer": answer, "correct": trajectory["correct"],
             "answer_format_valid": answer in row["Options"],
             "outcome": "Success" if trajectory["correct"] else "Failure",

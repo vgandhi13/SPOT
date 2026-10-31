@@ -1,6 +1,7 @@
 """Create privileged memories from exported Glimpse trajectories (run_<i> folders).
 
-Without --execute, prints the plan and makes no model calls. With --include-frames,
+Without --execute, prints the plan and makes no model calls. Rerunning with the same
+--output skips memories already made, so a run stopped by a rate limit can be resumed. With --include-frames,
 each memory request also carries the frames the agent received (needs an image-capable model).
 
   python -m Privileged_Context.Memories.run --holmes-json <train json> --output <scratch dir> \\
@@ -21,9 +22,10 @@ from .records import holmes_index, load_record
 
 def main():
     cli = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    cli.add_argument('--trajectories', type=Path, nargs='+', required=True, help='run_<i> folders from export.py')
+    cli.add_argument('--trajectories', type=Path, nargs='+', default=[], help='run_<i> folders from export.py')
+    cli.add_argument('--trajectory-list', type=Path, help='File with one run_<i> folder per line')
     cli.add_argument('--holmes-json', type=Path, required=True, help='Video-Holmes split JSON with question rows')
-    cli.add_argument('--output', type=Path, help='Fresh output folder (not under /home or /project)')
+    cli.add_argument('--output', type=Path, help='Output folder (not under /home or /project); existing memories in it are skipped')
     cli.add_argument('--backend', choices=('openrouter', 'claude'), default='openrouter')
     cli.add_argument('--model', help='Default: the free Nemotron 3 Ultra route, or claude-sonnet-4-6 for Claude')
     cli.add_argument('--allow-paid', action='store_true', help='Allow non-free pricing for an explicitly selected model')
@@ -43,6 +45,10 @@ def main():
         validate_endpoint(args.endpoint)
     if min(args.timeout, args.max_attempts, args.max_tokens) < 1 or args.request_interval < 0:
         raise ValueError('Invalid retry/token settings')
+    if args.trajectory_list:
+        args.trajectories += [Path(line) for line in args.trajectory_list.read_text().split()]
+    if not args.trajectories:
+        raise ValueError('Give --trajectories and/or --trajectory-list')
     rows = holmes_index(args.holmes_json)
     records = [load_record(path, rows) for path in args.trajectories]
     plan = {'backend': args.backend, 'model': args.model, 'include_frames': args.include_frames,
@@ -78,18 +84,22 @@ def main():
         if status.returncode or not json.loads(status.stdout).get('loggedIn'):
             raise ValueError('Run claude auth login first')
         args.transport_version = args.claude_version
-    output.mkdir(parents=True, exist_ok=False)
-    write(output / 'config.json', {**plan, 'transport_version': args.transport_version,
+    output.mkdir(parents=True, exist_ok=True)
+    config = output / 'config.json'
+    if config.exists() and {k: read(config).get(k) for k in ('backend', 'model', 'include_frames')} != \
+            {'backend': args.backend, 'model': args.model, 'include_frames': args.include_frames}:
+        raise ValueError('Output folder holds memories from different settings; use a fresh folder')
+    write(output / f'config-{os.environ["SLURM_JOB_ID"]}.json', {**plan, 'transport_version': args.transport_version,
                                    'temperature': args.temperature, 'max_tokens': args.max_tokens})
     args.output = output
     try:
-        write(output / 'status.json', {'state': 'memories'})
+        if not config.exists():
+            write(config, plan)
         result = pipeline.generate_memories(records, args)
         pipeline.validate_memories(read(result['path']))
-        write(output / 'status.json', {'state': 'completed', 'count': result['count']})
-    except BaseException as exc:
-        write(output / 'status.json', {'state': 'failed', 'error': f'{type(exc).__name__}: {exc}'})
-        raise
+        print(json.dumps(result), flush=True)
+    except pipeline.QuotaExhausted as exc:
+        raise SystemExit(f'Stopped: {exc}')
 
 
 if __name__ == '__main__':
